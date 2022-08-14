@@ -2,6 +2,7 @@
 
 #include <av/Frame.hpp>
 #include <av/common.hpp>
+#include <av/Packet.hpp>
 
 namespace av
 {
@@ -45,7 +46,7 @@ public:
 		if (ret < 0)
 		{
 			avcodec_free_context(&codecContext);
-			RETURN_AV_ERROR("Could not open video codec: {}", avErrorStr(ret));
+			RETURN_AV_ERROR("Could not open video/audio codec: {}", avErrorStr(ret));
 		}
 
 		return Ptr<Decoder>{new Decoder{codecContext}};

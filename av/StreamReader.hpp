@@ -51,7 +51,7 @@ public:
 				return false;
 
 			Ptr<Decoder> dec;
-			if (packet.native()->stream_index == std::get<0>(vStream_)->index)
+			if (std::get<0>(vStream_) && packet.native()->stream_index == std::get<0>(vStream_)->index)
 			{
 				dec = std::get<1>(vStream_);
 
@@ -116,6 +116,11 @@ public:
 		return std::get<1>(aStream_)->native()->channels;
 	}
 
+	auto channel_layout() const noexcept
+	{
+		return std::get<1>(aStream_)->native()->channel_layout;
+	}
+
 	auto sampleRate() const noexcept
 	{
 		return std::get<1>(aStream_)->native()->sample_rate;
@@ -124,6 +129,21 @@ public:
 	auto sampleFormat() const noexcept
 	{
 		return std::get<1>(aStream_)->native()->sample_fmt;
+	}
+
+	auto video() const noexcept
+	{
+		return std::get<1>(vStream_)->native();
+	}
+
+	auto audio() const noexcept
+	{
+		return std::get<1>(aStream_)->native();
+	}
+
+	auto inputFormat() const noexcept
+	{
+		return ic_;
 	}
 
 private:

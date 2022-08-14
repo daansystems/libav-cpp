@@ -15,12 +15,12 @@ class StreamWriter : NoCopyable
 	StreamWriter() = default;
 
 public:
-	[[nodiscard]] static Expected<Ptr<StreamWriter>> create(std::string_view filename) noexcept
+	[[nodiscard]] static Expected<Ptr<StreamWriter>> create(std::string_view filename, std::string_view formatName = {}) noexcept
 	{
 		Ptr<StreamWriter> sw{new StreamWriter};
 		sw->filename_ = filename;
 
-		auto fcExp = OutputFormat::create(filename);
+		auto fcExp = OutputFormat::create(filename, formatName);
 		if (!fcExp)
 			FORWARD_AV_ERROR(fcExp);
 
@@ -63,11 +63,14 @@ public:
 		stream->frame   = frameExp.value();
 		stream->encoder = c;
 
-		auto swsExp = Scale::create(inWidth, inHeight, inPixFmt, outWidth, outHeight, c->native()->pix_fmt);
-		if (!swsExp)
-			FORWARD_AV_ERROR(swsExp);
+		if (inWidth != outWidth || inHeight != outHeight || inPixFmt != c->native()->pix_fmt) {
+			// auto swsExp = Scale::create(inWidth, inHeight, inPixFmt, outWidth, outHeight, c->native()->pix_fmt);
+			auto swsExp = Scale::create(inWidth, inHeight, inPixFmt, outWidth, outHeight, AV_PIX_FMT_NV12);
+			if (!swsExp)
+				FORWARD_AV_ERROR(swsExp);
 
-		stream->sws = swsExp.value();
+			stream->sws = swsExp.value();
+		}
 
 		auto sIndExp = formatContext_->addStream(c);
 		if (!sIndExp)
@@ -93,7 +96,7 @@ public:
 	}
 
 	[[nodiscard]] Expected<int> addAudioStream(std::variant<AVCodecID, std::string_view> codecName, int inChannels, AVSampleFormat inSampleFmt, int inSampleRate,
-	                                           int outChannels, int outSampleRate, int outBitRate, OptValueMap&& codecParams = {}) noexcept
+	                                           int outChannels, AVSampleFormat outSampleFmt, int outSampleRate, int outBitRate, OptValueMap&& codecParams = {}) noexcept
 	{
 		auto stream  = makePtr<Stream>();
 		stream->type = AVMEDIA_TYPE_AUDIO;
@@ -112,7 +115,7 @@ public:
 		else
 			c = makePtr<Encoder>(std::get<std::string_view>(codecName));
 #endif
-		c->setAudioParams(outChannels, outSampleRate, outBitRate, std::move(codecParams));
+		c->setAudioParams(outChannels, outSampleRate, outSampleFmt, outBitRate, std::move(codecParams));
 		auto cOpenExp = c->open();
 		if (!cOpenExp)
 			FORWARD_AV_ERROR(cOpenExp);
@@ -124,11 +127,16 @@ public:
 		stream->frame   = frameExp.value();
 		stream->encoder = c;
 
-		auto swrExp = Resample::create(inChannels, inSampleFmt, inSampleRate, outChannels, c->native()->sample_fmt, outSampleRate);
-		if (!swrExp)
-			FORWARD_AV_ERROR(swrExp);
+		if (false && inChannels != outChannels ||
+			inSampleFmt != outSampleFmt ||
+			inSampleRate != outSampleRate) {
 
-		stream->swr = swrExp.value();
+			auto swrExp = Resample::create(inChannels, inSampleFmt, inSampleRate, outChannels, outSampleFmt, outSampleRate);
+			if (!swrExp)
+				FORWARD_AV_ERROR(swrExp);
+
+			stream->swr = swrExp.value();
+		}
 
 		auto sIndExp = formatContext_->addStream(c);
 		if (!sIndExp)
@@ -154,17 +162,30 @@ public:
 
 		if (stream->type == AVMEDIA_TYPE_VIDEO)
 		{
-			stream->sws->scale(frame, *stream->frame);
-			stream->frame->native()->pts = stream->nextPts++;
+			if (stream->sws) {
+					stream->sws->scale(frame, *stream->frame);
+			} else {
+					*stream->frame = frame;
+			}
+			// if (frame.native()->pts <= 0) {
+				stream->frame->native()->pts = stream->nextPts++;
+			//}
 		}
 		else if (stream->type == AVMEDIA_TYPE_AUDIO)
 		{
-			stream->swr->convert(frame, *stream->frame);
+			if (stream->swr) {
+				stream->swr->convert(frame, *stream->frame);
+			} else {
+				*stream->frame = frame;
+			}
+				//if (frame.native()->pts <= 0) {
 			stream->frame->native()->pts = stream->nextPts;
+				//}
 			stream->nextPts += stream->frame->native()->nb_samples;
 		}
 		else
 			RETURN_AV_ERROR("Unsupported/unknown stream type: {}", av_get_media_type_string(stream->type));
+
 
 		auto [res, sz] = stream->encoder->encodeFrame(*stream->frame, stream->packets);
 
@@ -208,6 +229,11 @@ public:
 		{
 			flushStream(stream->index);
 		}
+	}
+
+	auto stream(int index) const noexcept
+	{
+		return streams_.at(index);
 	}
 
 private:

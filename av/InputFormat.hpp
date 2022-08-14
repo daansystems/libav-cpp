@@ -33,8 +33,8 @@ public:
 
 		{
 			auto ret = res->findBestStream(AVMEDIA_TYPE_VIDEO);
-			if (!ret)
-				FORWARD_AV_ERROR(ret);
+			// if (!ret)
+			//	FORWARD_AV_ERROR(ret);
 		}
 
 		if (enableAudio)
@@ -93,7 +93,7 @@ private:
 	Expected<void> findBestStream(AVMediaType type) noexcept
 	{
 		AVCodec* dec = nullptr;
-		int stream_i = av_find_best_stream(ic_, type, -1, -1, &dec, 0);
+		int stream_i = av_find_best_stream(ic_, type, -1, -1, (const AVCodec**)&dec, 0);
 		if (stream_i == AVERROR_STREAM_NOT_FOUND)
 			RETURN_AV_ERROR("Failed to find {} stream in '{}'", av_get_media_type_string(type), url_);
 		if (stream_i == AVERROR_DECODER_NOT_FOUND)

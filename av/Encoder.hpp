@@ -4,9 +4,11 @@
 #include <av/common.hpp>
 #include <av/Frame.hpp>
 #include <av/Packet.hpp>
+#include <av/common.hpp>
 
 namespace av
 {
+
 class Encoder : NoCopyable
 {
 	explicit Encoder(AVCodecContext* codecContext) noexcept
@@ -94,14 +96,46 @@ public:
 		return codecContext_;
 	}
 
+	int set_hwframe_ctx(AVCodecContext* ctx, AVBufferRef* hw_device_ctx)
+	{
+		AVBufferRef* hw_frames_ref;
+		AVHWFramesContext* frames_ctx = NULL;
+		int err                       = 0;
+		if (!(hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx))) {
+			fprintf(stderr, "Failed to create VAAPI frame context.\n");
+			return -1;
+		}
+		frames_ctx                    = (AVHWFramesContext*) (hw_frames_ref->data);
+		frames_ctx->format            = AV_PIX_FMT_VAAPI;
+		frames_ctx->sw_format         = AV_PIX_FMT_NV12;
+		frames_ctx->width             = codecContext_->width;
+		frames_ctx->height            = codecContext_->height;
+		frames_ctx->initial_pool_size = 20;
+		if ((err = av_hwframe_ctx_init(hw_frames_ref)) < 0) {
+			LOG_AV_ERROR("Failed to initialize VAAPI frame context: {}", avErrorStr(err));
+			av_buffer_unref(&hw_frames_ref);
+			return err;
+		}
+		ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
+		if (!ctx->hw_frames_ctx)
+			err = AVERROR(ENOMEM);
+
+		av_buffer_unref(&hw_frames_ref);
+		return err;
+	}
+
 	Expected<void> open() noexcept
 	{
 		AVDictionary* opts = nullptr;
-		auto ret           = avcodec_open2(codecContext_, codecContext_->codec, &opts);
+		// av_dict_set(&opts, "frame_duration", "20", 0);
+		// av_opt_set_int(codecContext_, "frame_duration", 21, AV_OPT_SEARCH_CHILDREN);
+		// av_opt_set_int(codecContext_->priv_data, "frame_duration", 21, 0);
+		// auto ret = avcodec_open2(codecContext_, codecContext_->codec, &opts);
+		auto ret = avcodec_open2(codecContext_, codecContext_->codec, &opts);
 		if (ret < 0)
 		{
 			avcodec_free_context(&codecContext_);
-			RETURN_AV_ERROR("Could not open video codec: {}", avErrorStr(ret));
+			RETURN_AV_ERROR("Could not open video/audio codec: {}", avErrorStr(ret));
 		}
 
 		return {};
@@ -123,17 +157,33 @@ public:
                      * timebase should be 1/framerate and timestamp increments should be
                      * identical to 1. */
 		codecContext_->time_base = framerate;
-
-		codecContext_->bit_rate = 0;
+		// codecContext_->bit_rate  = 0;
+		codecContext_->bit_rate = 2500000;
 		if (codecContext_->priv_data)
 		{
 			OptSetter::set(codecContext_->priv_data, valueMap);
 		}
+		codecContext_->global_quality = 190;
+
+		int err = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, NULL, NULL, 0);
+		if (err < 0) {
+			LOG_AV_ERROR("Failed to create a VAAPI device: {}", av::avErrorStr(err));
+			exit(1);
+		}
+
+
+		/* set hw_frames_ctx for encoder's AVCodecContext */
+		if ((err = set_hwframe_ctx(codecContext_, hw_device_ctx)) < 0) {
+
+			LOG_AV_ERROR("Failed to set hwframe context: {}", av::avErrorStr(err));
+			exit(1);
+		}
 	}
 
-	void setAudioParams(int channels, int sampleRate, int bitRate, OptValueMap&& valueMap) noexcept
+	void setAudioParams(int channels, int sampleRate, AVSampleFormat sampleFormat, int bitRate, OptValueMap&& valueMap) noexcept
 	{
 		/* Resolution must be a multiple of two. */
+		codecContext_->sample_fmt     = sampleFormat;
 		codecContext_->channels       = channels;
 		codecContext_->channel_layout = av_get_default_channel_layout(channels);
 		codecContext_->sample_rate    = sampleRate;
@@ -159,7 +209,8 @@ public:
 
 		frame->width  = codecContext_->width;
 		frame->height = codecContext_->height;
-		frame->format = codecContext_->pix_fmt;
+		// frame->format = codecContext_->pix_fmt;
+		frame->format = AV_PIX_FMT_NV12;
 		frame->pts    = 0;
 
 		/* allocate the buffers for the frame data */
@@ -183,6 +234,7 @@ public:
 		//frame->nb_samples = 1024;
 		frame->sample_rate = codecContext_->sample_rate;
 		frame->format      = codecContext_->sample_fmt;
+		frame->channels    = codecContext_->channels;
 		frame->pts         = 0;
 		frame->pkt_dts     = 0;
 
@@ -191,9 +243,38 @@ public:
 
 	std::tuple<Result, int> encodeFrame(Frame& frame, std::vector<Packet>& packets) noexcept
 	{
-		if (!sendFrame(*frame))
-			return {Result::kFail, 0};
+		AVFrame* hw_frame = NULL;
+		if (codecContext_->codec->type == AVMEDIA_TYPE_VIDEO) {
+			int err;
+			hw_frame = av_frame_alloc();
+			if (!hw_frame) {
+				LOG_AV_ERROR("OUT OF MEMORY");
+				exit(1);
+			}
 
+			hw_frame->pts = frame.native()->pts;
+			if ((err = av_hwframe_get_buffer(codecContext_->hw_frames_ctx, hw_frame, 0)) < 0) {
+				LOG_AV_ERROR("av_hwframe_get_buffer: {}", avErrorStr(err));
+				exit(1);
+			}
+			if (!hw_frame->hw_frames_ctx) {
+				LOG_AV_ERROR("OUT OF MEMORY");
+				exit(1);
+			}
+			if ((err = av_hwframe_transfer_data(hw_frame, *frame, 0)) < 0) {
+				LOG_AV_ERROR("Error while transferring frame data to surface: {}", avErrorStr(err));
+				exit(1);
+			}
+			if (!sendFrame(hw_frame)) {
+				return {Result::kFail, 0};
+			}
+			av_frame_free(&hw_frame);
+		}
+		else {
+			if (!sendFrame(*frame)) {
+				return {Result::kFail, 0};
+			}
+		}
 		return receivePackets(packets);
 	}
 
@@ -251,18 +332,9 @@ private:
 		switch (codecContext_->codec->type)
 		{
 			case AVMEDIA_TYPE_AUDIO:
-				codecContext_->sample_fmt  = codecContext_->codec->sample_fmts ? codecContext_->codec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
-				codecContext_->bit_rate    = 64000;
-				codecContext_->sample_rate = 44100;
-				if (codecContext_->codec->supported_samplerates)
-				{
-					codecContext_->sample_rate = codecContext_->codec->supported_samplerates[0];
-					for (int i = 0; codecContext_->codec->supported_samplerates[i]; i++)
-					{
-						if (codecContext_->codec->supported_samplerates[i] == 44100)
-							codecContext_->sample_rate = 44100;
-					}
-				}
+				codecContext_->sample_fmt     = codecContext_->codec->sample_fmts ? codecContext_->codec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+				codecContext_->bit_rate       = 128000;
+				codecContext_->sample_rate    = 48000;
 				codecContext_->channels       = av_get_channel_layout_nb_channels(codecContext_->channel_layout);
 				codecContext_->channel_layout = AV_CH_LAYOUT_STEREO;
 				if (codecContext_->codec->channel_layouts)
@@ -318,6 +390,7 @@ private:
 
 private:
 	AVCodecContext* codecContext_{nullptr};
+	AVBufferRef* hw_device_ctx{nullptr};
 };
 
 }// namespace av
